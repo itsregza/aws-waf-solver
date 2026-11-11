@@ -2,6 +2,7 @@
   "url": "https://minisoshop.co.uk/",
   "proxy": "",
   "retries": 5,
-  "gemini_api_key": "",
-  "gemini_model": "gemini-flash-lite-latest"
+  "provider": "gemini",
+  "api_key": "",
+  "model": ""
 }

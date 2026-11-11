@@ -6,9 +6,35 @@ const { webcrypto } = require("crypto");
 const https = require("https");
 
 const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 const CHALLENGE_PATH = path.join(__dirname, "challenge.js");
-const challengeScript = new vm.Script(fs.readFileSync(CHALLENGE_PATH, "utf8"), { filename: "challenge.js" });
+const challengeCache = new Map();
+let bundledScript = null;
+
+function bundledChallenge() {
+  if (!bundledScript) {
+    bundledScript = new vm.Script(fs.readFileSync(CHALLENGE_PATH, "utf8"), { filename: "challenge.js" });
+  }
+  return bundledScript;
+}
+
+async function loadChallengeScript(tokenRoot) {
+  const root = String(tokenRoot || "").replace(/\/+$/, "");
+  if (!root) return bundledChallenge();
+  const url = `${root}/challenge.js`;
+  const cached = challengeCache.get(url);
+  if (cached) return cached;
+  try {
+    const r = await get(url);
+    const body = r.body || "";
+    if (r.status === 200 && body.includes("AwsWafIntegration")) {
+      const script = new vm.Script(body, { filename: url });
+      challengeCache.set(url, script);
+      return script;
+    }
+  } catch (_) {}
+  return bundledChallenge();
+}
 
 function get(url) {
   return new Promise((resolve, reject) => {
@@ -16,7 +42,7 @@ function get(url) {
       .get(url, { headers: { "user-agent": UA, accept: "text/html,*/*" } }, (res) => {
         let d = "";
         res.on("data", (c) => (d += c));
-        res.on("end", () => resolve({ body: d, headers: res.headers }));
+        res.on("end", () => resolve({ status: res.statusCode, body: d, headers: res.headers }));
       })
       .on("error", reject);
   });
@@ -308,6 +334,7 @@ async function runZoey(opts = {}) {
   const sandbox = makeWindow(goku, tokenRoot, pageUrl);
   sandbox.console = { log() {}, warn() {}, error() {} };
   vm.createContext(sandbox);
+  const challengeScript = await loadChallengeScript(tokenRoot);
   challengeScript.runInContext(sandbox, { timeout: 20000 });
   const aws = sandbox.AwsWafIntegration;
   if (!aws) throw new Error("no AwsWafIntegration");

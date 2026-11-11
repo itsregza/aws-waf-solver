@@ -14,14 +14,16 @@ FALLBACK_MODELS = (
     "gemini-flash-latest",
 )
 
-cfg = {"provider": "gemini", "model": DEFAULT_MODEL, "api_key": ""}
+OPENAI_MODEL = "gpt-4.1-mini"
+
+cfg = {"provider": "gemini", "model": "", "api_key": ""}
 
 
 def configure(provider=None, model=None, api_key=None):
     if provider:
         cfg["provider"] = provider.strip().lower()
-    if model:
-        cfg["model"] = model.strip()
+    if model is not None:
+        cfg["model"] = (model or "").strip()
     if api_key is not None:
         cfg["api_key"] = (api_key or "").strip()
 
@@ -34,16 +36,15 @@ class HttpErr(RuntimeError):
 
 
 def key_and_model():
-    key = (
-        cfg.get("api_key")
-        or os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or ""
-    ).strip()
     provider = (cfg.get("provider") or "gemini").strip().lower()
     if provider in ("google", "gemini-flash"):
         provider = "gemini"
-    model = (cfg.get("model") or DEFAULT_MODEL).strip()
+    if provider not in ("gemini", "openai"):
+        raise RuntimeError(f"unknown provider {provider!r}, use gemini or openai")
+    env = ("OPENAI_API_KEY",) if provider == "openai" else ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+    key = (cfg.get("api_key") or next((os.environ[k] for k in env if os.environ.get(k)), "")).strip()
+    default = OPENAI_MODEL if provider == "openai" else DEFAULT_MODEL
+    model = (cfg.get("model") or default).strip()
     if model.lower() in ("gemini-2.0-flash", "gemini-2.0-flash-001"):
         model = DEFAULT_MODEL
     return provider, key, model
@@ -221,7 +222,7 @@ def gemini(text_prompt, image_jpeg, api_key, model):
         except HttpErr as e:
             errors.append(f"{mid}: HTTP {e.code}")
             if e.code == 429:
-                raise RuntimeError(f"{mid} rate limited") from e
+                raise RuntimeError(f"gemini rate limited on {mid}, free tier keys run out fast") from e
             if e.code in (400, 404):
                 continue
             raise
@@ -231,16 +232,48 @@ def gemini(text_prompt, image_jpeg, api_key, model):
     raise RuntimeError("gemini failed: " + "; ".join(errors[:6]))
 
 
+def openai(text_prompt, image_jpeg, api_key, model):
+    b64 = base64.b64encode(image_jpeg).decode("ascii")
+    payload = {
+        "model": model,
+        "temperature": 0.0,
+        "max_tokens": 120,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            }
+        ],
+    }
+    try:
+        data = post_json(
+            "https://api.openai.com/v1/chat/completions",
+            payload,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        )
+    except HttpErr as e:
+        raise RuntimeError(f"openai http {e.code}: {e.body[:200]}") from e
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(f"openai bad response: {json.dumps(data)[:300]}") from e
+    return parse_json(str(text or ""))
+
+
 def pick_tiles(challenge, tile_bytes):
     if len(tile_bytes) != 9:
-        raise ValueError(f"need 9 tiles, got {len(tile_bytes)}")
+        raise ValueError(f"expected 9 tiles, got {len(tile_bytes)}")
     provider, key, model = key_and_model()
     if not key:
-        raise RuntimeError("no gemini key")
+        raise RuntimeError(f"no {provider} api key set")
     try:
         sheet = montage(tile_bytes)
     except ImportError as e:
-        raise RuntimeError("pip install pillow") from e
-    if provider != "gemini":
-        raise RuntimeError("only gemini supported")
+        raise RuntimeError("pillow is missing, run pip install -r requirements.txt") from e
+    if provider == "openai":
+        return openai(prompt(challenge), sheet, key, model)
     return gemini(prompt(challenge), sheet, key, model)

@@ -1,15 +1,27 @@
 import atexit
+import base64
 import json
+import shutil
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VM = ROOT / "js" / "zoey_vm.js"
-ZERO = __import__("base64").b64encode(b"\x00" * 1024).decode("ascii")
+ZERO = base64.b64encode(b"\x00" * 1024).decode("ascii")
+TIMEOUT = 60
 
 proc = None
 lock = threading.Lock()
+reader = ThreadPoolExecutor(max_workers=1)
+
+
+def node_path():
+    path = shutil.which("node")
+    if not path:
+        raise RuntimeError("node not found on PATH, install Node.js 18+")
+    return path
 
 
 def stop():
@@ -32,13 +44,21 @@ def stop():
             pass
 
 
+def readline(p, timeout):
+    try:
+        return reader.submit(p.stdout.readline).result(timeout=timeout)
+    except FutureTimeout:
+        stop()
+        raise RuntimeError(f"node vm timed out after {timeout}s")
+
+
 def daemon():
     global proc
     if proc is not None and proc.poll() is None:
         return proc
     stop()
     p = subprocess.Popen(
-        ["node", str(VM), "--daemon"],
+        [node_path(), str(VM), "--daemon"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -46,26 +66,23 @@ def daemon():
         bufsize=1,
         cwd=str(ROOT),
     )
-    line = p.stdout.readline()
-    if not line:
-        stop()
-        raise RuntimeError("node vm died on start")
-    if not json.loads(line.strip()).get("ready"):
-        stop()
-        raise RuntimeError("node vm not ready")
     proc = p
+    line = readline(p, 15)
+    if not line or not json.loads(line.strip()).get("ready"):
+        stop()
+        raise RuntimeError("node vm failed to start")
     return p
 
 
-def request(req):
+def request(req, timeout=TIMEOUT):
     with lock:
         p = daemon()
         p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
         p.stdin.flush()
-        line = p.stdout.readline()
+        line = readline(p, timeout)
         if not line:
             stop()
-            raise RuntimeError("node vm died")
+            raise RuntimeError("node vm exited unexpectedly")
         return json.loads(line.strip())
 
 
@@ -77,7 +94,7 @@ def mp_files(meta):
     }
 
 
-def zoey(page_url="https://minisoshop.co.uk/", goku=None, token_root=None, tries=2):
+def zoey(page_url, goku=None, token_root=None, tries=2):
     req = {"page_url": page_url}
     if goku:
         req["goku"] = goku
@@ -89,17 +106,18 @@ def zoey(page_url="https://minisoshop.co.uk/", goku=None, token_root=None, tries
             data = request(req)
             if data.get("ok") and data.get("meta"):
                 return data
-            err = data.get("error") or "zoey failed"
+            err = data.get("error") or "zoey payload was empty"
         except Exception as e:
             err = str(e)
             stop()
-    raise RuntimeError(err or "zoey failed")
+    raise RuntimeError(f"zoey failed: {err}")
 
 
 def warm():
     def run():
         try:
-            daemon()
+            with lock:
+                daemon()
         except Exception:
             pass
 
@@ -107,4 +125,3 @@ def warm():
 
 
 atexit.register(stop)
-warm()

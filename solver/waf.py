@@ -2,7 +2,6 @@ import base64
 import json
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 import requests
@@ -112,20 +111,9 @@ class Waf:
 
     def token(self, goku, token_root):
         t0 = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_in = pool.submit(
-                self.session.get, token_root + "/inputs?client=browser", headers=self.hdrs, timeout=30
-            )
-            fut_z = pool.submit(zoey, self.page_url, goku=goku, token_root=token_root)
-            r = fut_in.result()
-            r.raise_for_status()
-            inputs = r.json()
-            vm = fut_z.result()
-        self.step("inputs + zoey", t0)
-
-        meta = json.loads(json.dumps(vm["meta"]))
-        meta["challenge"] = inputs.get("challenge") or meta.get("challenge") or {}
+        meta = json.loads(json.dumps(zoey(self.page_url, goku=goku, token_root=token_root)["meta"]))
         meta["goku_props"] = goku
+        self.step("zoey", t0)
 
         t0 = time.perf_counter()
         r = self.session.post(token_root + "/mp_verify", headers=self.hdrs, files=mp_files(meta), timeout=60)
